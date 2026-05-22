@@ -1,0 +1,27 @@
+# ===== Frontend =====
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env.*.local
+
+# ===== Backend =====
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/venv/
+backend/.venv/
+backend/*.db
+backend/*.sqlite
+backend/.env
+*.db
+*.sqlite
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Misc =====
+*.zip
+*.log
+docs/screenshots/
