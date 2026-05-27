@@ -230,9 +230,7 @@ export function CanvasEditor() {
   // Having a single source of truth (this effect) eliminates the race entirely.
   const { activeWorkspaceId: syncWorkspaceId } = useAppStore();
   useEffect(() => {
-    console.log('[SYNC-EFFECT] fired. canvasNodes.length=', canvasNodes.length, 'canvasEdges.length=', canvasEdges.length, 'syncWorkspaceId=', syncWorkspaceId);
     if (canvasNodes.length === 0 && canvasEdges.length === 0) {
-      console.log('[SYNC-EFFECT] early-return (both empty)');
       return;
     }
 
@@ -243,7 +241,6 @@ export function CanvasEditor() {
     }
 
     // Apply incoming store data to local ReactFlow state
-    console.log('[SYNC-EFFECT] calling setNodes with', canvasNodes.length, 'nodes');
     setNodes(canvasNodes);
     setEdges(canvasEdges);
 
@@ -728,18 +725,14 @@ export function CanvasEditor() {
       setHasUnsaved(false);
 
       const activeProfile = getActiveProfile();
-      const resp = await fetch(`http://localhost:8000/workspaces/${activeWorkspaceId}/execute-stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          initial_payload: compiledPayload,
-          llm_config: activeProfile ? {
-            api_key: activeProfile.apiKey || null,
-            base_url: activeProfile.baseUrl || null,
-            model_id: activeProfile.modelId || null,
-            temperature: activeProfile.temperature ?? null,
-          } : null,
-        }),
+      const resp = await api.executeWorkflowStream(activeWorkspaceId, {
+        initial_payload: compiledPayload,
+        llm_config: activeProfile ? {
+          api_key: activeProfile.apiKey || null,
+          base_url: activeProfile.baseUrl || null,
+          model_id: activeProfile.modelId || null,
+          temperature: activeProfile.temperature ?? null,
+        } : null,
       });
 
       if (!resp.ok || !resp.body) throw new Error("Stream request failed");

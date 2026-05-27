@@ -188,6 +188,10 @@ npm run dev
 OPENAI_API_KEY=sk-your-api-key-here
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4o  # deepseek-chat, claude-3-opus なども使用可能です
+
+# CORS 許可リスト —— API を呼び出せるフロントエンドの origin をカンマ区切りで指定。
+# 未設定の場合はローカル開発用ポートを許可。本番環境では正確なドメインに絞り込んでください。
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3121
 ```
 
 ---

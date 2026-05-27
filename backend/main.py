@@ -5,20 +5,30 @@ from sqlalchemy.orm import Session
 from typing import List
 import asyncio
 import json as _json
+import os
 import threading
+
+from dotenv import load_dotenv
 
 import crud, models, schemas
 from database import SessionLocal, engine, Base
+
+# Load env before reading ALLOWED_ORIGINS
+load_dotenv()
 
 # Create database tables (For dev environment)
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Yuri OS Backend API")
 
-# Configure CORS for frontend access
+# CORS — read allowlist from env. Falls back to common local dev origins.
+_default_origins = "http://localhost:3000,http://localhost:3121,http://127.0.0.1:3000,http://127.0.0.1:3121"
+_origins_env = os.getenv("ALLOWED_ORIGINS", _default_origins)
+ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, replace with specific frontend URL
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,7 +106,7 @@ def delete_agent(agent_id: int, db: Session = Depends(get_db)):
     return db_agent
 
 # --- Engine Execution Endpoints ---
-from engine.compiler import compile_workflow
+from engine.compiler import compile_workflow, CycleDetectedError
 import time
 
 @app.post("/workspaces/{workspace_id}/execute", response_model=schemas.ExecuteResponse)
@@ -161,6 +171,14 @@ def execute_workspace(workspace_id: int, request: schemas.ExecuteRequest, db: Se
             logs=final_state.get("logs", []),
             results_by_node=final_state.get("results_by_node", {})
         )
+    except CycleDetectedError as e:
+        execution_time_ms = int((time.time() - start_time) * 1000)
+        crud.update_execution_log(db, db_log.id, {
+            "status": "failed",
+            "logs_json": [str(e)],
+            "execution_time_ms": execution_time_ms
+        })
+        raise HTTPException(status_code=400, detail={"error": "cycle_detected", "message": str(e), "cycle": e.cycle})
     except Exception as e:
         execution_time_ms = int((time.time() - start_time) * 1000)
         # Update log with failure
@@ -229,6 +247,16 @@ async def execute_workspace_stream(workspace_id: int, request: schemas.ExecuteRe
                         "logs": final_state.get("logs", []),
                         "results_by_node": final_state.get("results_by_node", {}),
                         "execution_log_id": log_id,
+                    }),
+                    loop
+                )
+            except CycleDetectedError as e:
+                asyncio.run_coroutine_threadsafe(
+                    queue.put({
+                        "type": "error",
+                        "error": "cycle_detected",
+                        "message": str(e),
+                        "cycle": e.cycle,
                     }),
                     loop
                 )

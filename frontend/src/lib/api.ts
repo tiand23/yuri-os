@@ -127,6 +127,22 @@ export const api = {
     return res.json();
   },
 
+  executeWorkflowStream: (workspaceId: number, body: {
+    initial_payload: string;
+    llm_config?: {
+      api_key: string | null;
+      base_url: string | null;
+      model_id: string | null;
+      temperature: number | null;
+    } | null;
+  }): Promise<Response> => {
+    return fetch(`${getApiBaseUrl()}/workspaces/${workspaceId}/execute-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  },
+
   testAgent: async (payload: { label: string; description: string; system_prompt?: string; model?: string; temperature?: number; input_text: string }) => {
     const res = await fetch(`${getApiBaseUrl()}/api/lab/test-agent`, {
       method: 'POST',

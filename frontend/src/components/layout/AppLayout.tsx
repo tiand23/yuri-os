@@ -58,9 +58,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const canvasLoadedForWorkspace = useRef<number | null>(null);
 
   useEffect(() => {
-    console.log('[APPLAYOUT] canvas effect fired. activeWorkspaceId=', activeWorkspaceId, 'ref=', canvasLoadedForWorkspace.current);
     if (!activeWorkspaceId) {
-      console.log('[APPLAYOUT] no activeWorkspaceId → setCanvasData([], [])');
       setCanvasData([], []);
       canvasLoadedForWorkspace.current = null;
       return;
@@ -68,21 +66,18 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
     // Already loaded for this workspace — skip to avoid interfering with in-place edits
     if (canvasLoadedForWorkspace.current === activeWorkspaceId) {
-      console.log('[APPLAYOUT] guard hit — skipping');
       return;
     }
 
     // workspaces list not ready yet — wait for next effect run
     const activeWs = workspaces.find(w => w.id === activeWorkspaceId);
     if (!activeWs) {
-      console.log('[APPLAYOUT] workspace not found yet — waiting');
       return;
     }
 
     // Mark as loaded before calling setCanvasData to prevent double-fire
     canvasLoadedForWorkspace.current = activeWorkspaceId;
     const canvasData = (activeWs as any).canvas_data;
-    console.log('[APPLAYOUT] loading canvas. nodes=', canvasData?.nodes?.length ?? 0, 'edges=', canvasData?.edges?.length ?? 0);
     setCanvasData(canvasData?.nodes ?? [], canvasData?.edges ?? []);
   }, [activeWorkspaceId, workspaces, setCanvasData]);
 

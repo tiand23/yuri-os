@@ -1,7 +1,56 @@
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from langgraph.graph import StateGraph, START, END
 from engine.state import GraphState
 from engine.nodes import create_facility_node, create_condition_node
+
+
+class CycleDetectedError(ValueError):
+    """Raised when the canvas DAG contains a cycle. `cycle` lists the node ids forming the loop."""
+    def __init__(self, cycle: List[str]):
+        self.cycle = cycle
+        path = " → ".join(cycle)
+        super().__init__(f"Cycle detected in workflow: {path}. Yuri OS does not support cyclic graphs yet — remove the back-edge or use a Condition node to break the loop.")
+
+
+def _detect_cycle(node_ids: List[str], adjacency: Dict[str, List[str]]) -> Optional[List[str]]:
+    """DFS with 3-color marking. Returns the list of node ids forming a cycle, or None if acyclic."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: Dict[str, int] = {nid: WHITE for nid in node_ids}
+    parent: Dict[str, Optional[str]] = {nid: None for nid in node_ids}
+
+    def dfs(start: str) -> Optional[List[str]]:
+        stack = [(start, iter(adjacency.get(start, [])))]
+        color[start] = GRAY
+        while stack:
+            node, it = stack[-1]
+            nxt = next(it, None)
+            if nxt is None:
+                color[node] = BLACK
+                stack.pop()
+                continue
+            if color[nxt] == GRAY:
+                # Found a back-edge: reconstruct cycle from nxt up to node via parent chain
+                cycle = [nxt]
+                cur = node
+                while cur is not None and cur != nxt:
+                    cycle.append(cur)
+                    cur = parent[cur]
+                cycle.append(nxt)
+                cycle.reverse()
+                return cycle
+            if color[nxt] == WHITE:
+                parent[nxt] = node
+                color[nxt] = GRAY
+                stack.append((nxt, iter(adjacency.get(nxt, []))))
+        return None
+
+    for nid in node_ids:
+        if color[nid] == WHITE:
+            found = dfs(nid)
+            if found:
+                return found
+    return None
+
 
 def compile_workflow(canvas_data: Dict[str, Any], progress_callback=None, llm_config: dict = None):
     nodes = canvas_data.get("nodes", [])
@@ -9,6 +58,19 @@ def compile_workflow(canvas_data: Dict[str, Any], progress_callback=None, llm_co
 
     if not nodes:
         raise ValueError("Canvas is empty. No facilities deployed.")
+
+    # Pre-flight: detect cycles BEFORE building the StateGraph, so users get a
+    # clear, actionable error instead of a recursion_limit failure 50 invocations later.
+    raw_node_ids = [n["id"] for n in nodes]
+    raw_node_id_set = set(raw_node_ids)
+    pre_adjacency: Dict[str, List[str]] = {nid: [] for nid in raw_node_ids}
+    for edge in edges:
+        s, t = edge.get("source"), edge.get("target")
+        if s in raw_node_id_set and t in raw_node_id_set:
+            pre_adjacency[s].append(t)
+    cycle = _detect_cycle(raw_node_ids, pre_adjacency)
+    if cycle is not None:
+        raise CycleDetectedError(cycle)
 
     builder = StateGraph(GraphState)
 

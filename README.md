@@ -188,6 +188,10 @@ Your backend `.env` file controls the LLM powering the **Commander AI**.
 OPENAI_API_KEY=sk-your-api-key-here
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4o  # You can use deepseek-chat, claude-3-opus, etc.
+
+# CORS — comma-separated allowlist of origins permitted to call the API.
+# Defaults to common local dev ports if unset. Tighten this in production.
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3121
 ```
 
 ---

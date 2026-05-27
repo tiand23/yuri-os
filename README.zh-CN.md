@@ -188,6 +188,10 @@ npm run dev
 OPENAI_API_KEY=sk-your-api-key-here
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4o  # 你可以随意切换为 deepseek-chat, claude-3-opus 等模型
+
+# CORS 白名单 —— 允许调用 API 的前端 origin，逗号分隔。
+# 不设置则放行常见本地端口；生产环境请精确收紧。
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3121
 ```
 
 ---
