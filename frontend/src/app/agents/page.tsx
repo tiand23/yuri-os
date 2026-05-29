@@ -9,7 +9,7 @@ import { useI18nStore } from "@/lib/i18n-store";
 import {
   BrainCircuit, Code, Database, Search, Cpu, Plus, X,
   ArrowDown, Terminal, Sparkles, CheckCircle2, Trash2,
-  Pencil, Save, ChevronRight, FileArchive, Play, Clock, Upload,
+  Pencil, Save, ChevronRight, FileArchive, Play, Clock, Upload, AlertTriangle,
 } from "lucide-react";
 
 const roleIcons: Record<string, any> = {
@@ -64,6 +64,7 @@ export default function BattleLabPage() {
   const [generatedAgent, setGeneratedAgent] = useState<any>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
+  const [generationError, setGenerationError] = useState<string | null>(null);
 
   // 详情/编辑抽屉
   const [selectedAgent, setSelectedAgent] = useState<any>(null);
@@ -152,11 +153,13 @@ export default function BattleLabPage() {
     if (!aiPrompt.trim() || isGenerating) return;
     setIsGenerating(true);
     setGeneratedAgent(null);
+    setGenerationError(null);
     try {
       const result = await api.generateAgent(aiPrompt, locale);
       setGeneratedAgent(result);
     } catch (err) {
       console.error("Generation failed", err);
+      setGenerationError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsGenerating(false);
     }
@@ -165,6 +168,7 @@ export default function BattleLabPage() {
   const handleSaveGenerated = async () => {
     if (!generatedAgent || !activeWorkspaceId) return;
     setIsSaving(true);
+    setGenerationError(null);
     try {
       const newAgent = await api.createAgent(activeWorkspaceId, {
         role: generatedAgent.role,
@@ -179,6 +183,7 @@ export default function BattleLabPage() {
       setAiPrompt("");
     } catch (err) {
       console.error("Save failed", err);
+      setGenerationError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsSaving(false);
     }
@@ -307,6 +312,21 @@ export default function BattleLabPage() {
         </form>
 
         <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+          {generationError && !isGenerating && (
+            <div className="mb-4 rounded-md border border-red-500/40 bg-red-500/10 p-3 flex items-start gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
+              <AlertTriangle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[10px] font-mono font-bold text-red-300 uppercase tracking-wider mb-0.5">
+                  {t('lab_generation_error')}
+                </div>
+                <div className="text-xs font-mono text-red-200/90 break-words">{generationError}</div>
+              </div>
+              <button onClick={() => setGenerationError(null)} className="text-red-400/60 hover:text-red-400 shrink-0">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
           {isGenerating && (
             <div className="flex flex-col items-center justify-center h-40 gap-3 text-white/55">
               <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />

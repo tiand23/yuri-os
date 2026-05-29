@@ -30,7 +30,7 @@ import { DeletableEdge } from "./DeleteableEdge";
 import { AgentLibrary } from "./AgentLibrary";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import { MiniCanvas } from "./MiniCanvas";
-import { Save, Play, X, Terminal, Info, MousePointer2, Loader2, Upload, ChevronDown, ChevronRight, ExternalLink, CheckCircle2, AlertCircle, Zap, Globe, Sliders, Cpu, Search, FileText, Code, Database, BrainCircuit, Settings, ArrowRight, Check, Sparkles, RefreshCw, Lock, FileJson } from "lucide-react";
+import { Save, Play, X, Terminal, Info, MousePointer2, Loader2, Upload, ChevronDown, ChevronRight, ExternalLink, CheckCircle2, AlertCircle, Zap, Globe, Sliders, Cpu, Search, FileText, Code, Database, BrainCircuit, Settings, ArrowRight, Check, Sparkles, RefreshCw, Lock, FileJson, Package } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 const nodeTypes = {
@@ -355,40 +355,40 @@ export function CanvasEditor() {
     try {
       let currentArch: { nodes: any[]; edges: any[] } | undefined = undefined;
 
+      // Mirror page.tsx — preserve condition_prompt / tools / sourceHandle when re-architecting.
+      const nodeToArchPayload = (n: any) => {
+        const isCondition = n.type === "condition" || n.data.role === "condition";
+        return {
+          id: n.id,
+          label: n.data.label,
+          role: isCondition ? "condition" : n.data.role,
+          description: n.data.description || "",
+          input: n.data.input || "",
+          output: n.data.output || "",
+          ...(isCondition
+            ? { condition_prompt: n.data.condition_prompt || "" }
+            : { system_prompt: n.data.system_prompt || "" }),
+          tools: Array.isArray(n.data.tools) ? n.data.tools : undefined,
+        };
+      };
+      const edgeToArchPayload = (e: any) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        description: e.label || "",
+        ...(e.sourceHandle ? { sourceHandle: e.sourceHandle } : {}),
+      });
+
       if (hasPendingPlan && !activeSession?.deployed) {
         const plan = activeSession!.pendingPlan!;
         currentArch = {
-          nodes: plan.nodes.map((n: any) => ({
-            id: n.id,
-            label: n.data.label,
-            role: n.data.role,
-            description: n.data.description,
-            input: n.data.input,
-            output: n.data.output
-          })),
-          edges: plan.edges.map((e: any) => ({
-            id: e.id,
-            source: e.source,
-            target: e.target,
-            description: e.label || ""
-          }))
+          nodes: plan.nodes.map(nodeToArchPayload),
+          edges: plan.edges.map(edgeToArchPayload),
         };
       } else if (nodes.length > 0) {
         currentArch = {
-          nodes: nodes.map((n: any) => ({
-            id: n.id,
-            label: n.data.label,
-            role: n.data.role,
-            description: n.data.description,
-            input: n.data.input,
-            output: n.data.output
-          })),
-          edges: edges.map((e: any) => ({
-            id: e.id,
-            source: e.source,
-            target: e.target,
-            description: e.label || ""
-          }))
+          nodes: nodes.map(nodeToArchPayload),
+          edges: edges.map(edgeToArchPayload),
         };
       }
 
@@ -401,11 +401,14 @@ export function CanvasEditor() {
       const flowNodes = result.nodes.map((n: any) => {
         const key = n.label.toLowerCase();
         const preservedPosition = existingPositionsMap.get(key);
+        const isCondition = n.role === "condition";
         return {
           id: n.id,
-          type: "agent",
+          type: isCondition ? "condition" : "agent",
           position: preservedPosition ?? computedPositions[n.id] ?? { x: 100, y: 100 },
-          data: { label: n.label, role: n.role, status: "idle", description: n.description, input: n.input, output: n.output, system_prompt: n.system_prompt || "" },
+          data: isCondition
+            ? { label: n.label, role: "condition", status: "idle", condition_prompt: n.condition_prompt || "" }
+            : { label: n.label, role: n.role, status: "idle", description: n.description, input: n.input, output: n.output, system_prompt: n.system_prompt || "", tools: Array.isArray(n.tools) ? n.tools : undefined },
         };
       });
 
@@ -413,6 +416,7 @@ export function CanvasEditor() {
         id: e.id,
         source: e.source,
         target: e.target,
+        ...(e.sourceHandle ? { sourceHandle: e.sourceHandle } : {}),
         type: "smoothstep",
         animated: true,
         label: e.description || "",
@@ -447,6 +451,8 @@ export function CanvasEditor() {
       // 1. Create missing agents
       const existingLabels = new Set(globalAgents.map(a => a.label));
       for (const node of plan.nodes) {
+        // Condition nodes are pure router cells — they do not live in the Agent Library.
+        if (node.type === "condition" || node.data.role === "condition") continue;
         const { label, role, description, input, output, system_prompt } = node.data;
         if (!existingLabels.has(label)) {
           const newAgent = await api.createAgent(activeWorkspaceId, {
@@ -1472,6 +1478,24 @@ export function CanvasEditor() {
         >
           <Play className="w-4 h-4" />
           <span>{!activeWorkspaceId ? t('btn_workspace_offline') : isExecuting ? t('btn_executing') : t('btn_execute')}</span>
+        </button>
+        <button
+          onClick={() => {
+            if (!activeWorkspaceId || nodes.length === 0) return;
+            // Native browser download — backend sets Content-Disposition. Use anchor to avoid window/tab popup.
+            const a = document.createElement('a');
+            a.href = api.exportWorkflowUrl(activeWorkspaceId);
+            a.download = `yurios_workspace_${activeWorkspaceId}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+          }}
+          disabled={!activeWorkspaceId || nodes.length === 0}
+          title={t('btn_export_docker_tooltip')}
+          className="flex items-center space-x-2 px-5 py-2.5 bg-card/90 border border-cyan-400/60 text-cyan-300 font-mono text-sm font-bold tracking-widest rounded-full shadow-[0_0_20px_rgba(6,182,212,0.2)] hover:bg-cyan-500/20 hover:text-cyan-100 hover:shadow-[0_0_25px_rgba(6,182,212,0.5)] transition-all disabled:opacity-40 disabled:cursor-not-allowed backdrop-blur-md"
+        >
+          <Package className="w-4 h-4" />
+          <span>{t('btn_export_docker')}</span>
         </button>
         <button
           onClick={() => {

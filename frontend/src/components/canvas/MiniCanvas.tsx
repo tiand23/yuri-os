@@ -1,11 +1,13 @@
 import { ReactFlow, Background, BackgroundVariant } from "@xyflow/react";
 import { AgentNode } from "./AgentNode";
+import { ConditionNode } from "./ConditionNode";
 import { useAppStore } from "@/lib/store";
 import { useT } from "@/lib/useT";
 import "@xyflow/react/dist/style.css";
 
 const nodeTypes = {
   agent: AgentNode,
+  condition: ConditionNode,
 };
 
 export function MiniCanvas({ nodes: planNodes, edges: planEdges }: { nodes: any[], edges: any[] }) {

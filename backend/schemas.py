@@ -59,6 +59,7 @@ class ExecutionLogBase(BaseModel):
     logs_json: Optional[List[str]] = None
     results_by_node: Optional[Dict[str, Any]] = None
     nodes_snapshot: Optional[List[Dict[str, Any]]] = None
+    node_timings: Optional[Dict[str, Dict[str, Any]]] = None
     execution_time_ms: Optional[int] = None
 
 class ExecutionLogCreate(ExecutionLogBase):
@@ -129,12 +130,20 @@ class AgentNodeSchema(BaseModel):
     input: Optional[str] = ""
     output: Optional[str] = ""
     system_prompt: Optional[str] = ""
+    # When role == "condition", the LLM uses condition_prompt instead of system_prompt
+    # to decide a true/false routing. Plain agent nodes leave this as None.
+    condition_prompt: Optional[str] = None
+    # Subset of tool names from /api/tools the agent is allowed to call.
+    # None = all tools (legacy). Empty list = no tools (pure LLM).
+    tools: Optional[List[str]] = None
 
 class AgentEdgeSchema(BaseModel):
     id: str
     source: str
     target: str
-    description: str # 描述连线的数据流向或操作，例如“存入DB”、“传递分析报告”
+    description: str # 描述连线的数据流向或操作，例如"存入DB"、"传递分析报告"
+    # For edges leaving a condition node: must be "true" or "false". Otherwise None.
+    sourceHandle: Optional[str] = None
 
 class ArchitectureSchema(BaseModel):
     nodes: List[AgentNodeSchema]

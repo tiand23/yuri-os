@@ -12,6 +12,8 @@ class CycleDetectedError(ValueError):
         super().__init__(f"Cycle detected in workflow: {path}. Yuri OS does not support cyclic graphs yet — remove the back-edge or use a Condition node to break the loop.")
 
 
+
+
 def _detect_cycle(node_ids: List[str], adjacency: Dict[str, List[str]]) -> Optional[List[str]]:
     """DFS with 3-color marking. Returns the list of node ids forming a cycle, or None if acyclic."""
     WHITE, GRAY, BLACK = 0, 1, 2
@@ -72,6 +74,15 @@ def compile_workflow(canvas_data: Dict[str, Any], progress_callback=None, llm_co
     if cycle is not None:
         raise CycleDetectedError(cycle)
 
+    # Compute each node's upstream id list. Fan-in nodes (len > 1) use these at runtime
+    # (engine/nodes.py) to assemble their input payload from results_by_node[upstream_id]
+    # rather than reading current_payload (which is overwrite-semantics and would lose a branch).
+    incoming_sources: Dict[str, List[str]] = {nid: [] for nid in raw_node_ids}
+    for edge in edges:
+        s, t = edge.get("source"), edge.get("target")
+        if s in raw_node_id_set and t in raw_node_id_set:
+            incoming_sources[t].append(s)
+
     builder = StateGraph(GraphState)
 
     node_ids = set()
@@ -82,10 +93,12 @@ def compile_workflow(canvas_data: Dict[str, Any], progress_callback=None, llm_co
         node_type = node.get("type", "agent")
         data = node.get("data", {})
 
+        upstream_ids = incoming_sources.get(nid, [])
+
         if node_type == "condition":
             label = data.get("label", f"Condition_{nid}")
             condition_prompt = data.get("condition_prompt", "")
-            condition_func, _ = create_condition_node(nid, label, condition_prompt, progress_callback=progress_callback, llm_config=llm_config)
+            condition_func, _ = create_condition_node(nid, label, condition_prompt, upstream_ids=upstream_ids, progress_callback=progress_callback, llm_config=llm_config)
             builder.add_node(nid, condition_func)
             condition_node_ids.add(nid)
         else:
@@ -94,7 +107,8 @@ def compile_workflow(canvas_data: Dict[str, Any], progress_callback=None, llm_co
             system_prompt = data.get("system_prompt", "")
             model = data.get("model", "")
             temperature = float(data.get("temperature", 0.1))
-            builder.add_node(nid, create_facility_node(nid, label, description, system_prompt, model, temperature, progress_callback=progress_callback, llm_config=llm_config))
+            tools = data.get("tools")  # None | list[str] — None means all tools (legacy)
+            builder.add_node(nid, create_facility_node(nid, label, description, system_prompt, model, temperature, tools=tools, upstream_ids=upstream_ids, progress_callback=progress_callback, llm_config=llm_config))
 
         node_ids.add(nid)
 

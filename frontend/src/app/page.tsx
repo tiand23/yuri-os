@@ -141,42 +141,42 @@ export default function CommanderTerminal() {
     try {
       let currentArch: { nodes: any[]; edges: any[] } | undefined = undefined;
 
+      // When forwarding the current canvas back to the architect for a modify-request,
+      // we MUST preserve condition_prompt / tools / sourceHandle — otherwise the LLM
+      // sees a flattened DAG with no branching info and "unbranches" the graph.
+      const nodeToArchPayload = (n: any) => {
+        const isCondition = n.type === "condition" || n.data.role === "condition";
+        return {
+          id: n.id,
+          label: n.data.label,
+          role: isCondition ? "condition" : n.data.role,
+          description: n.data.description || "",
+          input: n.data.input || "",
+          output: n.data.output || "",
+          ...(isCondition
+            ? { condition_prompt: n.data.condition_prompt || "" }
+            : { system_prompt: n.data.system_prompt || "" }),
+          tools: Array.isArray(n.data.tools) ? n.data.tools : undefined,
+        };
+      };
+      const edgeToArchPayload = (e: any) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        description: e.label || "",
+        ...(e.sourceHandle ? { sourceHandle: e.sourceHandle } : {}),
+      });
+
       if (hasPendingPlan && !activeSession?.deployed) {
-        // Use pending plan as baseline before deployment
         const plan = activeSession!.pendingPlan!;
         currentArch = {
-          nodes: plan.nodes.map((n: any) => ({
-            id: n.id,
-            label: n.data.label,
-            role: n.data.role,
-            description: n.data.description,
-            input: n.data.input,
-            output: n.data.output
-          })),
-          edges: plan.edges.map((e: any) => ({
-            id: e.id,
-            source: e.source,
-            target: e.target,
-            description: e.label || ""
-          }))
+          nodes: plan.nodes.map(nodeToArchPayload),
+          edges: plan.edges.map(edgeToArchPayload),
         };
       } else if (hasActiveNodes) {
-        // Use live canvas state as baseline
         currentArch = {
-          nodes: canvasNodes.map((n: any) => ({
-            id: n.id,
-            label: n.data.label,
-            role: n.data.role,
-            description: n.data.description,
-            input: n.data.input,
-            output: n.data.output
-          })),
-          edges: canvasEdges.map((e: any) => ({
-            id: e.id,
-            source: e.source,
-            target: e.target,
-            description: e.label || ""
-          }))
+          nodes: canvasNodes.map(nodeToArchPayload),
+          edges: canvasEdges.map(edgeToArchPayload),
         };
       }
 
@@ -189,11 +189,14 @@ export default function CommanderTerminal() {
       const flowNodes = result.nodes.map((n: any) => {
         const key = n.label.toLowerCase();
         const preservedPosition = existingPositionsMap.get(key);
+        const isCondition = n.role === "condition";
         return {
           id: n.id,
-          type: "agent",
+          type: isCondition ? "condition" : "agent",
           position: preservedPosition ?? computedPositions[n.id] ?? { x: 100, y: 100 },
-          data: { label: n.label, role: n.role, status: "idle", description: n.description, input: n.input, output: n.output, system_prompt: n.system_prompt || "" },
+          data: isCondition
+            ? { label: n.label, role: "condition", status: "idle", condition_prompt: n.condition_prompt || "" }
+            : { label: n.label, role: n.role, status: "idle", description: n.description, input: n.input, output: n.output, system_prompt: n.system_prompt || "", tools: Array.isArray(n.tools) ? n.tools : undefined },
         };
       });
 
@@ -201,6 +204,7 @@ export default function CommanderTerminal() {
         id: e.id,
         source: e.source,
         target: e.target,
+        ...(e.sourceHandle ? { sourceHandle: e.sourceHandle } : {}),
         type: "smoothstep",
         animated: true,
         label: e.description || "",
@@ -236,6 +240,8 @@ export default function CommanderTerminal() {
       if (activeWorkspaceId) {
         const existingLabels = new Set(globalAgents.map(a => a.label));
         for (const node of plan.nodes) {
+          // Condition nodes are pure router cells — they do not live in the Agent Library.
+          if (node.type === "condition" || node.data.role === "condition") continue;
           const { label, role, description, input, output, system_prompt } = node.data;
           if (!existingLabels.has(label)) {
             const newAgent = await api.createAgent(activeWorkspaceId, {

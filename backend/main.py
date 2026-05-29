@@ -19,6 +19,24 @@ load_dotenv()
 # Create database tables (For dev environment)
 Base.metadata.create_all(bind=engine)
 
+
+def _ensure_column(table: str, column: str, ddl_type: str) -> None:
+    """Idempotent dev-only migration: add a column to an existing SQLite table if missing.
+    Production use should switch to Alembic; this keeps onboarding zero-friction."""
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        try:
+            existing = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+            cols = {row[1] for row in existing}  # row[1] = column name
+            if column not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+        except Exception:
+            # Non-SQLite backends (Postgres etc.) — let SQLAlchemy's create_all handle it.
+            pass
+
+
+_ensure_column("execution_logs", "node_timings", "JSON")
+
 app = FastAPI(title="Yuri OS Backend API")
 
 # CORS — read allowlist from env. Falls back to common local dev origins.
@@ -107,7 +125,15 @@ def delete_agent(agent_id: int, db: Session = Depends(get_db)):
 
 # --- Engine Execution Endpoints ---
 from engine.compiler import compile_workflow, CycleDetectedError
+from engine.tools import TOOL_METADATA
 import time
+
+
+@app.get("/api/tools")
+def list_available_tools():
+    """Returns metadata for all built-in tools. Used by the frontend to render
+    per-node tool-selection checkboxes in AgentConfigPanel."""
+    return {"tools": TOOL_METADATA}
 
 @app.post("/workspaces/{workspace_id}/execute", response_model=schemas.ExecuteResponse)
 def execute_workspace(workspace_id: int, request: schemas.ExecuteRequest, db: Session = Depends(get_db)):
@@ -142,28 +168,30 @@ def execute_workspace(workspace_id: int, request: schemas.ExecuteRequest, db: Se
     
     try:
         app_graph = compile_workflow(canvas_data)
-        
+
         # Initial State
         initial_state = {
             "current_payload": request.initial_payload,
             "logs": ["Engine Started."],
-            "results_by_node": {}
+            "results_by_node": {},
+            "node_timings": {}
         }
-        
+
         # Execute the compiled graph
         final_state = app_graph.invoke(initial_state)
-        
+
         execution_time_ms = int((time.time() - start_time) * 1000)
-        
+
         # Update log with success
         crud.update_execution_log(db, db_log.id, {
             "status": "completed",
             "final_payload": final_state.get("current_payload", ""),
             "logs_json": final_state.get("logs", []),
             "results_by_node": final_state.get("results_by_node", {}),
+            "node_timings": final_state.get("node_timings", {}),
             "execution_time_ms": execution_time_ms
         })
-        
+
         return schemas.ExecuteResponse(
             execution_log_id=db_log.id,
             status="completed",
@@ -237,7 +265,8 @@ async def execute_workspace_stream(workspace_id: int, request: schemas.ExecuteRe
                 initial_state = {
                     "current_payload": initial_payload,
                     "logs": ["Engine Started."],
-                    "results_by_node": {}
+                    "results_by_node": {},
+                    "node_timings": {}
                 }
                 final_state = app_graph.invoke(initial_state, config={"recursion_limit": 50})
                 asyncio.run_coroutine_threadsafe(
@@ -246,6 +275,7 @@ async def execute_workspace_stream(workspace_id: int, request: schemas.ExecuteRe
                         "final_payload": final_state.get("current_payload", ""),
                         "logs": final_state.get("logs", []),
                         "results_by_node": final_state.get("results_by_node", {}),
+                        "node_timings": final_state.get("node_timings", {}),
                         "execution_log_id": log_id,
                     }),
                     loop
@@ -279,6 +309,7 @@ async def execute_workspace_stream(workspace_id: int, request: schemas.ExecuteRe
                     "final_payload": event.get("final_payload", ""),
                     "logs_json": event.get("logs", []),
                     "results_by_node": event.get("results_by_node", {}),
+                    "node_timings": event.get("node_timings", {}),
                     "execution_time_ms": execution_time_ms,
                 })
                 break
@@ -484,30 +515,45 @@ ARCHITECT_SYSTEM_PROMPTS = {
 - coder: 代码编写、程序调试、技术实现、脚本生成
 - formatter: 格式转换、排版美化、Markdown整理、输出规范化
 - default: 通用处理，不属于以上任何明确类别时使用
+- condition: 条件判断节点 —— 必须用于任何 if/else、分支、二选一、是否满足某条件的场景。它读取上游输出后输出 true 或 false，下游会根据布尔值走不同分支。
+
+可用的 Tools (写入每个节点的 tools 字段；condition 节点 tools 必须为空数组):
+- "web_search": 通过 DuckDuckGo 搜索网页 —— 推荐给 searcher / summarizer
+- "fetch_url_content": 抓取 URL 文本内容 —— 推荐给 searcher / summarizer / writer
+- "execute_python_code": 在沙箱中执行 Python 代码 —— 推荐给 coder / formatter
 
 【重要指示】
 1. 节点设计必须具体，且完全按照输入(Input)-处理(Description)-输出(Output) 的极简黑盒理念设计。
-2. 每个节点必须包含 system_prompt 字段：为该 Agent 编写一段极具专业性、结构化的 System Prompt。
-   绝不允许写成几句干瘪的简述。你必须遵循以下结构来编写这个字段：
+2. 每个**非 condition** 节点必须包含 system_prompt 字段，遵循以下结构、不少于 250 字：
    "# Role: <定义其极其专业的角色>\n# Objective: <明确它的核心处理目标>\n# Workflow: <按步骤描述它应该怎么做>\n# Output Format: <它必须严格输出什么格式的数据，例如Markdown/JSON>"
-   请确保 system_prompt 字段的字数不少于 250 字，规则越详尽、边界条件越清晰越好。这是该 Agent 运行时遵循的唯一法则。
-3. 连线 (edges) 必须包含 description 字段，用简短的话描述这条线上传递了什么数据。
-4. 如果用户提供了【当前架构】，说明这是一次修改指令。你必须在现有架构基础上进行增删改，而不是重新生成全新架构。保留用户没有提到要修改的节点和连线，id 保持不变。
+3. 每个节点必须包含 **tools** 字段（字符串数组），只列出该节点真正需要的工具名，绝不要把所有工具都塞进去。一个 writer 节点通常不需要 execute_python_code；一个 summarizer 通常不需要 web_search（除非它也要现查）。tools 字段为 [] 表示纯 LLM 不调工具。
+4. **分支场景必须使用 condition 节点**，绝不允许从一个普通节点引出两条互斥的边来"伪造分支"。condition 节点必须：
+   - role 设为 "condition"
+   - 不包含 system_prompt，改用 **condition_prompt** 字段：写一段判断逻辑，明确告诉 LLM 在什么情况下输出 "true"、什么情况下输出 "false"。**只能输出这两个词之一**。
+   - 它的两条出边必须分别带 **sourceHandle: "true"** 和 **sourceHandle: "false"**，分别指向"判断为真"和"判断为假"时的下游节点。
+   - tools 必须为 []。
+5. 连线 (edges) 必须包含 description 字段。从 condition 节点出来的边必须额外有 sourceHandle 字段（"true" 或 "false"）。
+6. **当前不支持环 (cycle)**：节点不能形成回路。如果用户描述了"反复尝试"、"循环检查"、"直到满足"等需求，请用单次 condition 节点替代（例如 "判断当前结果是否合格，true 进入下一步，false 进入修正节点"），不要用真正的回边。
+7. 如果用户提供了【当前架构】，说明这是一次修改指令。在现有架构上增删改，而不是重新生成。保留未提到的节点和连线，id 保持不变。
 
-你必须且只能返回一个合法的 JSON 格式，不要包含 Markdown 标记（如 ```json）。
+你必须且只能返回一个合法的 JSON 格式，不要包含 Markdown 标记。
 返回的 JSON 必须符合以下结构:
 {
   "nodes": [
-    {"id": "node_1", "label": "逻辑装配中心", "role": "coder", "description": "负责编写前端代码", "input": "自然语言的功能需求", "output": "无报错的源代码文件", "system_prompt": "# Role: 资深前端架构师\n# Objective: 接收用户的功能需求描述，输出可直接运行的 React 组件代码...\n# Workflow: 1. 分析需求... 2. 编写代码...\n# Output Format: 只输出纯代码，不附带任何说明。"}
+    {"id": "node_1", "label": "新闻搜集器", "role": "searcher", "description": "搜集近一周新闻", "input": "关键词", "output": "新闻 JSON 列表", "tools": ["web_search", "fetch_url_content"], "system_prompt": "# Role: ...\n# Objective: ...\n# Workflow: ...\n# Output Format: ..."},
+    {"id": "node_2", "label": "是否含有图片", "role": "condition", "description": "判断输入文本中是否含有图片URL", "input": "原始新闻 JSON", "output": "true/false", "tools": [], "condition_prompt": "检查输入 JSON 中是否包含 image_url 字段且非空。若有，输出 true；否则输出 false。只输出这一个词。"},
+    {"id": "node_3", "label": "图文整合器", "role": "writer", "description": "对含图片的新闻生成图文摘要", "input": "新闻 JSON", "output": "Markdown 图文", "tools": ["fetch_url_content"], "system_prompt": "..."},
+    {"id": "node_4", "label": "纯文本整合器", "role": "writer", "description": "对无图片的新闻生成纯文本摘要", "input": "新闻 JSON", "output": "Markdown 文本", "tools": [], "system_prompt": "..."}
   ],
   "edges": [
-    {"id": "edge_1", "source": "node_1", "target": "node_2", "description": "将编译好的源代码传递给格式化器进行整理"}
+    {"id": "edge_1", "source": "node_1", "target": "node_2", "description": "传递新闻 JSON 进行图片判断"},
+    {"id": "edge_2", "source": "node_2", "target": "node_3", "sourceHandle": "true", "description": "有图片 -> 走图文路线"},
+    {"id": "edge_3", "source": "node_2", "target": "node_4", "sourceHandle": "false", "description": "无图片 -> 走纯文本路线"}
   ]
 }
-注意：description、input、output、system_prompt 字段缺一不可。绝不允许输出任何 Markdown 格式。直接输出纯 JSON 字符串。""",
+注意：description、input、output、tools 字段所有节点都必须有；非 condition 节点必须有 system_prompt；condition 节点必须有 condition_prompt 且没有 system_prompt。从 condition 节点出去的边必须有 sourceHandle。绝不允许输出任何 Markdown 格式。直接输出纯 JSON。""",
     "ja": """あなたは Yuri OS（ユーリ戦術オペレーティングシステム）の上級戦術参謀です。
 ユーザー（最高司令官）が自然言語の指示を入力します。その指示を分析し、マルチエージェント（Multi-Agent）協調作業のアーキテクチャ計画に変換してください。
-アーキテクチャを具体的なAgentノードとそれらの間のデータ/ロジック接続線に分解してください。
 
 許可されたAgentのロールと適用シナリオ:
 - searcher: 情報収集、データ取得、ウェブクエリ、スクレイピング
@@ -516,29 +562,45 @@ ARCHITECT_SYSTEM_PROMPTS = {
 - coder: コード作成、デバッグ、技術実装、スクリプト生成
 - formatter: フォーマット変換、レイアウト整形、Markdown整理、出力規範化
 - default: 汎用処理、上記のカテゴリに明確に該当しない場合に使用
+- condition: 条件判断ノード —— if/else、分岐、二者択一、何らかの条件を満たすかの判定シナリオで必ず使用。上流の出力を読み、true / false を出力。下流はブール値で異なる枝へ進む。
+
+利用可能なツール（各ノードの tools フィールドに記入。condition ノードは必ず空配列）:
+- "web_search": DuckDuckGo でウェブ検索 —— searcher / summarizer に推奨
+- "fetch_url_content": URL のテキストを取得 —— searcher / summarizer / writer に推奨
+- "execute_python_code": サンドボックスで Python を実行 —— coder / formatter に推奨
 
 【重要指示】
-1. ノード設計は具体的であり、入力(Input)-処理(Description)-出力(Output)の極簡ブラックボックス理念に完全に従ってください。
-2. 各ノードには system_prompt フィールドが必須です：このAgentのための高度に専門的で構造化されたSystem Promptを記述してください。
-   必ず以下の構造に従ってください: "# Role: <非常に専門的な役割の定義>\n# Objective: <コア処理目標の明確化>\n# Workflow: <実行すべき処理のステップ別記述>\n# Output Format: <厳密な出力フォーマット、例:Markdown/JSON>"
-   system_promptは250文字以上必須で、ルールと境界条件が詳細であるほど良い。これはこのAgentの実行時に従う唯一の法則です。
-3. 接続線（edges）には description フィールドが必須です。この接続線で転送されるデータを簡潔に説明してください。
-4. ユーザーが【現在のアーキテクチャ】を提供した場合、これは修正リクエストです。指示に基づいて既存のアーキテクチャを変更（追加/削除/編集）してください。変更されていないノードと接続線を保持し、IDを変更しないでください。
+1. ノード設計は具体的であり、入力(Input)-処理(Description)-出力(Output)の黒箱理念に従う。
+2. **condition 以外**のノードは system_prompt フィールド必須、以下の構造に従い 250 文字以上:
+   "# Role: <非常に専門的な役割の定義>\n# Objective: <コア処理目標の明確化>\n# Workflow: <実行すべき処理のステップ別記述>\n# Output Format: <厳密な出力フォーマット、例:Markdown/JSON>"
+3. 各ノードには **tools** フィールド（文字列配列）必須。そのノードが本当に必要なツール名のみを列挙する。writer ノードに execute_python_code は通常不要。空配列 [] は純 LLM を意味する。
+4. **分岐シナリオは必ず condition ノードを使う**。通常ノードから二本の排他的なエッジを引いて分岐を偽装してはならない。condition ノードは:
+   - role を "condition" に設定
+   - system_prompt は持たず、代わりに **condition_prompt** フィールド: 判定ロジックを記述し、どんな場合 "true"、どんな場合 "false" を出力するかを明確にする。**この二語のいずれかのみ出力**。
+   - 二本の出力エッジに **sourceHandle: "true"** と **sourceHandle: "false"** を必ず付け、真と偽の下流ノードへ振り分ける。
+   - tools は必ず [] 。
+5. エッジ (edges) には description フィールドが必須。condition ノードから出るエッジには sourceHandle フィールド（"true" または "false"）が追加で必要。
+6. **現在サイクル (循環) は非対応**。「繰り返し」「ループ」「満たすまで」などの要求は、単発の condition ノードで代替する。本物のバックエッジを使ってはならない。
+7. ユーザーが【現在のアーキテクチャ】を提供した場合、これは修正リクエスト。既存を変更し、無関係なノード / エッジは ID を保ったまま残す。
 
-必ずMarkdownマークアップなし（```jsonなし）の合法なJSONのみを返してください。
-返すJSONは以下の構造に従ってください:
+必ずMarkdownマークアップなしの合法な JSON のみを返してください。
+返す JSON は以下の構造:
 {
   "nodes": [
-    {"id": "node_1", "label": "ロジックアセンブリセンター", "role": "coder", "description": "フロントエンドコードを作成", "input": "自然言語の機能要件", "output": "エラーなしのソースコードファイル", "system_prompt": "# Role: シニアフロントエンドアーキテクト\n# Objective: ...\n# Workflow: 1. 要件を分析... 2. コードを作成...\n# Output Format: 純粋なコードのみ出力、説明なし。"}
+    {"id": "node_1", "label": "ニュース収集器", "role": "searcher", "description": "直近一週間のニュース収集", "input": "キーワード", "output": "ニュース JSON 配列", "tools": ["web_search", "fetch_url_content"], "system_prompt": "# Role: ...\n# Objective: ...\n# Workflow: ...\n# Output Format: ..."},
+    {"id": "node_2", "label": "画像有無判定", "role": "condition", "description": "入力テキストに画像URLが含まれるか判定", "input": "ニュース JSON", "output": "true/false", "tools": [], "condition_prompt": "入力 JSON に image_url フィールドが存在し空でない場合 true を、そうでなければ false を出力。この一語のみ。"},
+    {"id": "node_3", "label": "画像付きライター", "role": "writer", "description": "画像付きニュースの要約", "input": "ニュース JSON", "output": "Markdown", "tools": ["fetch_url_content"], "system_prompt": "..."},
+    {"id": "node_4", "label": "純テキストライター", "role": "writer", "description": "画像なしニュースの要約", "input": "ニュース JSON", "output": "Markdown", "tools": [], "system_prompt": "..."}
   ],
   "edges": [
-    {"id": "edge_1", "source": "node_1", "target": "node_2", "description": "コンパイル済みソースコードをフォーマッターに渡す"}
+    {"id": "edge_1", "source": "node_1", "target": "node_2", "description": "ニュース JSON を判定器へ"},
+    {"id": "edge_2", "source": "node_2", "target": "node_3", "sourceHandle": "true", "description": "画像あり -> 画像付き処理"},
+    {"id": "edge_3", "source": "node_2", "target": "node_4", "sourceHandle": "false", "description": "画像なし -> 純テキスト処理"}
   ]
 }
-注意: description、input、output、system_promptフィールドは全て必須です。Markdownフォーマットを一切出力しないでください。純粋なJSON文字列のみを出力してください。""",
+注意: description、input、output、tools フィールドは全ノード必須。condition 以外のノードは system_prompt が必須。condition ノードは condition_prompt が必須で system_prompt を持たない。condition ノードから出るエッジは sourceHandle が必須。純粋な JSON のみを出力すること。""",
     "en": """You are the senior tactical advisor of Yuri OS (Yuri Tactical Operating System).
 The user (Supreme Commander) will input a natural language directive. Analyze it and transform it into a Multi-Agent collaborative architecture plan.
-Break the architecture into specific Agent nodes and the data/logic connections between them.
 
 Allowed Agent roles and applicable scenarios:
 - searcher: information gathering, data acquisition, web queries, scraping
@@ -547,27 +609,43 @@ Allowed Agent roles and applicable scenarios:
 - coder: code writing, debugging, technical implementation, script generation
 - formatter: format conversion, layout beautification, Markdown organization, output normalization
 - default: general processing, use when none of the above categories clearly apply
+- condition: a routing/branching node. MUST be used for any if/else, branching, either-or, or condition-check scenario. It reads upstream output and emits true or false; downstream branches diverge based on the boolean.
+
+Available tools (write into each node's `tools` field; condition nodes MUST use an empty array):
+- "web_search": DuckDuckGo web search — recommended for searcher / summarizer
+- "fetch_url_content": fetch and extract text from a URL — recommended for searcher / summarizer / writer
+- "execute_python_code": sandboxed Python execution — recommended for coder / formatter
 
 [IMPORTANT INSTRUCTIONS]
-1. Node design must be specific and follow the extreme minimalist black-box philosophy of Input-Process-Output.
-2. Each node MUST include a system_prompt field: write a highly professional, structured System Prompt for this Agent.
-   Never write it as a few dry sentences. You MUST follow this structure:
+1. Node design must follow the Input → Process(Description) → Output black-box philosophy.
+2. **Non-condition** nodes MUST include a `system_prompt` field, at least 250 chars, following:
    "# Role: <define its highly professional role>\n# Objective: <clarify its core processing goal>\n# Workflow: <step-by-step description of what it should do>\n# Output Format: <strictly what format it must output, e.g. Markdown/JSON>"
-   Ensure system_prompt is at least 250 characters. The more detailed the rules and edge cases, the better. This is the only law this Agent follows at runtime.
-3. Edges (connections) MUST include a description field briefly describing what data flows through this connection.
-4. If the user provides [CURRENT ARCHITECTURE], this is a modification request. Make additions/deletions/edits to the existing architecture based on the directive. Keep unchanged nodes and edges with their original IDs.
+3. Every node MUST include a `tools` field (array of strings). List ONLY the tools the node actually needs — do NOT dump all tools into every node. A writer rarely needs execute_python_code; a summarizer rarely needs web_search. Empty array `[]` means pure LLM.
+4. **Any branching scenario MUST use a condition node.** Never fake a branch by drawing two mutually-exclusive edges from an ordinary node. A condition node MUST:
+   - have `role: "condition"`
+   - have NO `system_prompt`, and instead a **`condition_prompt`** that clearly specifies when to emit "true" and when "false". It must emit ONLY one of those two words.
+   - have its two outgoing edges tagged with **`sourceHandle: "true"`** and **`sourceHandle: "false"`** respectively, going to the "if-true" and "if-false" downstream nodes.
+   - have `tools: []`.
+5. Edges (connections) MUST include a `description` field. Edges leaving a condition node MUST additionally include a `sourceHandle` field ("true" or "false").
+6. **Cycles are NOT supported.** If the user asks for "retry until ...", "loop ...", "iterate until ...", model it as a single condition node (e.g. "if quality OK -> done, else -> revise"). Do NOT introduce back-edges.
+7. If the user provides [CURRENT ARCHITECTURE], this is a modification request. Edit/add/delete on the existing graph; keep unchanged nodes and edges with their original IDs.
 
-You MUST return ONLY valid JSON without any Markdown markup (no ```json).
+You MUST return ONLY valid JSON without any Markdown markup.
 The JSON MUST follow this structure:
 {
   "nodes": [
-    {"id": "node_1", "label": "Logic Assembly Center", "role": "coder", "description": "Writes frontend code", "input": "Natural language feature requirements", "output": "Error-free source code files", "system_prompt": "# Role: Senior Frontend Architect\n# Objective: Receive feature requirement descriptions and output directly runnable React component code...\n# Workflow: 1. Analyze requirements... 2. Write code...\n# Output Format: Output pure code only, no explanations."}
+    {"id": "node_1", "label": "News Collector", "role": "searcher", "description": "Collect news from the past week", "input": "Keywords", "output": "News JSON array", "tools": ["web_search", "fetch_url_content"], "system_prompt": "# Role: ...\n# Objective: ...\n# Workflow: ...\n# Output Format: ..."},
+    {"id": "node_2", "label": "Has Image?", "role": "condition", "description": "Check if input news items contain image URLs", "input": "News JSON", "output": "true/false", "tools": [], "condition_prompt": "Check whether the input JSON has a non-empty image_url field. Output true if yes, false otherwise. Output only that single word."},
+    {"id": "node_3", "label": "Rich Media Writer", "role": "writer", "description": "Write a rich-media summary for news with images", "input": "News JSON", "output": "Markdown with images", "tools": ["fetch_url_content"], "system_prompt": "..."},
+    {"id": "node_4", "label": "Plain Text Writer", "role": "writer", "description": "Write a plain-text summary for news without images", "input": "News JSON", "output": "Markdown", "tools": [], "system_prompt": "..."}
   ],
   "edges": [
-    {"id": "edge_1", "source": "node_1", "target": "node_2", "description": "Pass compiled source code to formatter for cleanup"}
+    {"id": "edge_1", "source": "node_1", "target": "node_2", "description": "pass news JSON to the image checker"},
+    {"id": "edge_2", "source": "node_2", "target": "node_3", "sourceHandle": "true", "description": "has image -> rich media path"},
+    {"id": "edge_3", "source": "node_2", "target": "node_4", "sourceHandle": "false", "description": "no image -> plain text path"}
   ]
 }
-Note: description, input, output, system_prompt fields are all mandatory. Never output any Markdown format. Output pure JSON string only.""",
+Note: description, input, output, tools are required for ALL nodes. Non-condition nodes require system_prompt; condition nodes require condition_prompt and have NO system_prompt. Edges leaving a condition node require sourceHandle. Output pure JSON only.""",
 }
 
 @app.post("/api/commander/architect", response_model=schemas.ArchitectureSchema)

@@ -1,8 +1,9 @@
 "use client";
 
-import { X, Trash2, Terminal, GitBranch, Cpu, Save } from "lucide-react";
+import { X, Trash2, Terminal, GitBranch, Cpu, Save, Wrench } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/useT";
+import { api, ToolMetadata } from "@/lib/api";
 
 interface AgentConfigPanelProps {
   nodeId: string | null;
@@ -12,9 +13,13 @@ interface AgentConfigPanelProps {
   onDelete: (id: string) => void;
 }
 
+// Module-level cache so we only hit /api/tools once per page lifetime
+let toolsCache: ToolMetadata[] | null = null;
+
 export function AgentConfigPanel({ nodeId, nodeData, onClose, onUpdate, onDelete }: AgentConfigPanelProps) {
   const [formData, setFormData] = useState<any>({});
   const [dirty, setDirty] = useState(false);
+  const [availableTools, setAvailableTools] = useState<ToolMetadata[]>(toolsCache ?? []);
   const t = useT();
 
   useEffect(() => {
@@ -23,6 +28,28 @@ export function AgentConfigPanel({ nodeId, nodeData, onClose, onUpdate, onDelete
       setDirty(false);
     }
   }, [nodeId, nodeData]);
+
+  useEffect(() => {
+    if (toolsCache) return;
+    api.listTools().then(({ tools }) => {
+      toolsCache = tools;
+      setAvailableTools(tools);
+    }).catch(() => {/* tool list unavailable — fall back to no checkboxes */});
+  }, []);
+
+  // Treat undefined tools as "all enabled" (legacy behavior matching backend select_tools(None))
+  const selectedTools: string[] = Array.isArray(formData.tools)
+    ? formData.tools
+    : availableTools.map(t => t.name);
+
+  const toggleTool = (name: string) => {
+    const next = selectedTools.includes(name)
+      ? selectedTools.filter(n => n !== name)
+      : [...selectedTools, name];
+    const newData = { ...formData, tools: next };
+    setFormData(newData);
+    setDirty(true);
+  };
 
   if (!nodeId || !nodeData) return null;
 
@@ -147,6 +174,54 @@ export function AgentConfigPanel({ nodeId, nodeData, onClose, onUpdate, onDelete
                 className="w-full rounded border border-green-500/20 bg-background/95 p-2.5 font-mono text-xs text-green-400/80 placeholder:text-white/30 focus:border-green-500/50 focus:outline-none resize-none leading-relaxed"
               />
             </div>
+
+            {/* 工具装备区 — 节点级 tool 选择，对应 backend engine/tools.py 的 TOOL_REGISTRY */}
+            {availableTools.length > 0 && (
+              <div className="space-y-2">
+                <label className="font-mono text-xs font-bold tracking-wider text-cyan-400/80 uppercase flex items-center gap-1">
+                  <Wrench className="h-3 w-3" /> {t('tools_label')}
+                </label>
+                <p className="text-[10px] font-mono text-slate-500 leading-relaxed">{t('tools_hint')}</p>
+                <div className="space-y-1.5">
+                  {availableTools.map(tool => {
+                    const enabled = selectedTools.includes(tool.name);
+                    const recommended = tool.recommended_for.includes(formData.role || "");
+                    return (
+                      <div
+                        key={tool.name}
+                        onClick={() => toggleTool(tool.name)}
+                        className={`flex items-start gap-2 p-2 rounded border cursor-pointer transition-all ${
+                          enabled
+                            ? "border-cyan-500/50 bg-cyan-500/10"
+                            : "border-white/10 bg-background/40 hover:border-cyan-500/30"
+                        }`}
+                      >
+                        <div className={`w-3.5 h-3.5 mt-0.5 rounded border flex items-center justify-center shrink-0 transition-all ${
+                          enabled
+                            ? "border-cyan-400 bg-cyan-400/20"
+                            : "border-white/30 bg-transparent"
+                        }`}>
+                          {enabled && <div className="w-1.5 h-1.5 bg-cyan-300 rounded-sm" />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`font-mono text-xs font-bold ${enabled ? "text-cyan-200" : "text-white/60"}`}>
+                              {tool.label}
+                            </span>
+                            {recommended && (
+                              <span className="text-[9px] font-mono px-1 py-0 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 uppercase">
+                                {t('tool_recommended')}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] font-mono text-white/45 mt-0.5">{tool.description}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

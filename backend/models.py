@@ -44,6 +44,7 @@ class ExecutionLog(Base):
     logs_json = Column(JSON, nullable=True) # Store detailed log stream
     results_by_node = Column(JSON, nullable=True) # Store results per node: {node_id: output_text}
     nodes_snapshot = Column(JSON, nullable=True) # Store node metadata at execution time: [{id, label, role}]
+    node_timings = Column(JSON, nullable=True) # {node_id: {started_at, ended_at, duration_ms}} for Gantt visualization
     execution_time_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     

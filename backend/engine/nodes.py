@@ -1,16 +1,40 @@
-from typing import Any
+import time
+from typing import Any, List, Optional
 from engine.state import GraphState
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.prebuilt import create_react_agent
-from engine.tools import AVAILABLE_TOOLS
+from engine.tools import select_tools
 
-def create_facility_node(node_id: str, label: str, description: str, system_prompt: str = "", model: str = "", temperature: float = 0.1, progress_callback=None, llm_config: dict = None):
+def _assemble_payload(state: GraphState, upstream_ids: Optional[List[str]]) -> str:
+    """Pick the right input payload for this node.
+
+    Single-upstream / source nodes read `current_payload` — the linear baton.
+    Fan-in nodes (len(upstream_ids) > 1) instead pull each upstream's output from
+    results_by_node and concatenate them with a delimiter. Reading current_payload
+    in a fan-in case would only see whichever branch happened to commit last.
+    """
+    if upstream_ids and len(upstream_ids) > 1:
+        results = state.get("results_by_node", {}) or {}
+        parts = []
+        for uid in upstream_ids:
+            up_out = results.get(uid, "")
+            parts.append(f"[from {uid}]\n{up_out}")
+        return "\n\n---\n\n".join(parts)
+    return state.get("current_payload", "")
+
+
+def create_facility_node(node_id: str, label: str, description: str, system_prompt: str = "", model: str = "", temperature: float = 0.1, tools: Optional[List[str]] = None, upstream_ids: Optional[List[str]] = None, progress_callback=None, llm_config: dict = None):
     def facility_func(state: GraphState) -> GraphState:
-        payload = state.get("current_payload", "")
-        logs = state.get("logs", [])
-        results_by_node = state.get("results_by_node", {})
+        payload = _assemble_payload(state, upstream_ids)
+        # Reducers fold dict updates from parallel siblings, but for the *baseline* we still
+        # want this node's contribution to be just {node_id: output} (not "previous full dict + own").
+        # Each task only returns its own delta; the reducer at channel level handles the union.
+        logs: List[str] = []
+        results_by_node: Dict[str, str] = {}
+        node_timings: Dict[str, Dict[str, Any]] = {}
 
+        started_at_ms = int(time.time() * 1000)
         if progress_callback:
             progress_callback({"type": "node_start", "node_id": node_id, "label": label})
 
@@ -23,7 +47,7 @@ def create_facility_node(node_id: str, label: str, description: str, system_prom
             temp = cfg.get("temperature") if cfg.get("temperature") is not None else temperature
             
             llm = ChatOpenAI(model=model_name, base_url=base_url, temperature=temp, api_key=api_key)
-            agent = create_react_agent(llm, tools=AVAILABLE_TOOLS)
+            agent = create_react_agent(llm, tools=select_tools(tools))
 
             if system_prompt:
                 system_content = system_prompt
@@ -50,24 +74,45 @@ def create_facility_node(node_id: str, label: str, description: str, system_prom
 
         results_by_node[node_id] = output_text
 
-        if progress_callback:
-            progress_callback({"type": "node_done", "node_id": node_id, "label": label, "output": output_text})
+        ended_at_ms = int(time.time() * 1000)
+        node_timings[node_id] = {
+            "started_at": started_at_ms,
+            "ended_at": ended_at_ms,
+            "duration_ms": ended_at_ms - started_at_ms,
+        }
 
-        return {"current_payload": output_text, "logs": new_logs, "results_by_node": results_by_node}
+        if progress_callback:
+            progress_callback({
+                "type": "node_done",
+                "node_id": node_id,
+                "label": label,
+                "output": output_text,
+                "duration_ms": ended_at_ms - started_at_ms,
+            })
+
+        return {
+            "current_payload": output_text,
+            "logs": new_logs,
+            "results_by_node": results_by_node,
+            "node_timings": node_timings,
+        }
 
     return facility_func
 
 
-def create_condition_node(node_id: str, label: str, condition_prompt: str = "", progress_callback=None, llm_config: dict = None):
+def create_condition_node(node_id: str, label: str, condition_prompt: str = "", upstream_ids: Optional[List[str]] = None, progress_callback=None, llm_config: dict = None):
     """
-    Condition node: asks LLM to evaluate current payload and return 'true' or 'false'.
+    Condition node: asks LLM to evaluate input payload and return 'true' or 'false'.
     The result is stored in state so conditional_edges can route accordingly.
+    Same fan-in handling as facility_func — multiple upstreams get joined from results_by_node.
     """
     def condition_func(state: GraphState) -> GraphState:
-        payload = state.get("current_payload", "")
-        logs = state.get("logs", [])
-        results_by_node = state.get("results_by_node", {})
+        payload = _assemble_payload(state, upstream_ids)
+        # delta-only — reducers at channel level handle the merge with sibling branches
+        results_by_node: Dict[str, str] = {}
+        node_timings: Dict[str, Dict[str, Any]] = {}
 
+        started_at_ms = int(time.time() * 1000)
         if progress_callback:
             progress_callback({"type": "node_start", "node_id": node_id, "label": label})
 
@@ -88,17 +133,35 @@ def create_condition_node(node_id: str, label: str, condition_prompt: str = "", 
             response = llm.invoke([SystemMessage(content=system_content), HumanMessage(content=f"INPUT PAYLOAD:\n{payload}")])
             decision = str(response.content).strip().lower()
             branch = "true" if "true" in decision else "false"
-            new_logs = logs + [f"[CONDITION] {label} routed → {branch.upper()}"]
+            new_logs = [f"[CONDITION] {label} routed → {branch.upper()}"]
         except Exception as e:
             branch = "false"
-            new_logs = logs + [f"[ERROR] {label} condition failed, defaulting to false: {str(e)}"]
+            new_logs = [f"[ERROR] {label} condition failed, defaulting to false: {str(e)}"]
 
         results_by_node[node_id] = f"BRANCH: {branch}"
 
-        if progress_callback:
-            progress_callback({"type": "node_done", "node_id": node_id, "label": label, "output": f"BRANCH: {branch}"})
+        ended_at_ms = int(time.time() * 1000)
+        node_timings[node_id] = {
+            "started_at": started_at_ms,
+            "ended_at": ended_at_ms,
+            "duration_ms": ended_at_ms - started_at_ms,
+        }
 
-        return {"current_payload": payload, "logs": new_logs, "results_by_node": results_by_node}
+        if progress_callback:
+            progress_callback({
+                "type": "node_done",
+                "node_id": node_id,
+                "label": label,
+                "output": f"BRANCH: {branch}",
+                "duration_ms": ended_at_ms - started_at_ms,
+            })
+
+        return {
+            "current_payload": payload,
+            "logs": new_logs,
+            "results_by_node": results_by_node,
+            "node_timings": node_timings,
+        }
 
     def router(state: GraphState) -> str:
         result = state.get("results_by_node", {}).get(node_id, "BRANCH: false")

@@ -1,7 +1,14 @@
 const getApiBaseUrl = () => {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
   if (typeof window !== 'undefined') {
-    return `http://${window.location.hostname}:8000`;
+    // Force IPv4 when the hostname is the loopback alias.
+    // Background: uvicorn defaults to binding 127.0.0.1 (IPv4 only). If a developer
+    // also runs Docker (or anything else) on IPv6 *:8000, browsers resolve "localhost"
+    // to ::1 first, hit the other process, and 404. Pinning to 127.0.0.1 dodges that
+    // entire class of bug. Non-loopback hostnames (e.g. LAN dev) pass through unchanged.
+    const host = window.location.hostname;
+    const ipv4Host = host === 'localhost' ? '127.0.0.1' : host;
+    return `http://${ipv4Host}:8000`;
   }
   return 'http://127.0.0.1:8000';
 };
@@ -168,4 +175,23 @@ export const api = {
     if (!res.ok) throw new Error('Failed to fetch execution logs');
     return res.json();
   },
+
+  /** Returns the URL to trigger a native browser download of the Dockerized workspace zip. */
+  exportWorkflowUrl: (workspaceId: number): string => {
+    return `${getApiBaseUrl()}/workspaces/${workspaceId}/export`;
+  },
+
+  /** Fetches metadata for all backend-registered tools (name, description, recommended roles). */
+  listTools: async (): Promise<{ tools: ToolMetadata[] }> => {
+    const res = await fetch(`${getApiBaseUrl()}/api/tools`);
+    if (!res.ok) throw new Error('Failed to fetch tools');
+    return res.json();
+  },
 };
+
+export interface ToolMetadata {
+  name: string;
+  label: string;
+  description: string;
+  recommended_for: string[];
+}
