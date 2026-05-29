@@ -26,6 +26,7 @@ import { api } from "@/lib/api";
 import { useCommanderStore } from "@/lib/commander-store";
 import { AgentNode } from "./AgentNode";
 import { ConditionNode } from "./ConditionNode";
+import { CodeNode } from "./CodeNode";
 import { DeletableEdge } from "./DeleteableEdge";
 import { AgentLibrary } from "./AgentLibrary";
 import { AgentConfigPanel } from "./AgentConfigPanel";
@@ -36,6 +37,7 @@ import { useRouter } from "next/navigation";
 const nodeTypes = {
   agent: AgentNode,
   condition: ConditionNode,
+  code: CodeNode,
 };
 
 const edgeTypes = {
@@ -173,13 +175,27 @@ export function CanvasEditor() {
 
       const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
 
+      let newData: Record<string, unknown>;
+      if (nodeType === "condition") {
+        newData = { label: label || t('condition_node_name_default'), condition_prompt: "" };
+      } else if (nodeType === "code") {
+        newData = {
+          label: label || t('code_node_name_default'),
+          role: "code",
+          status: "idle",
+          description: description || "",
+          input: input || "",
+          output: output || "",
+          code: "import sys\npayload = sys.stdin.read()\n# transform payload here\nprint(payload)",
+        };
+      } else {
+        newData = { label, role, status: "idle", description, input, output, system_prompt };
+      }
       const newNode: Node = {
         id: `node_${Date.now()}`,
         type: nodeType,
         position,
-        data: nodeType === "condition"
-          ? { label: label || t('condition_node_name_default'), condition_prompt: "" }
-          : { label, role, status: "idle", description, input, output, system_prompt },
+        data: newData as any,
       };
 
       setNodes((nds) => nds.concat(newNode));
@@ -355,21 +371,24 @@ export function CanvasEditor() {
     try {
       let currentArch: { nodes: any[]; edges: any[] } | undefined = undefined;
 
-      // Mirror page.tsx — preserve condition_prompt / tools / sourceHandle when re-architecting.
+      // Mirror page.tsx — preserve condition_prompt / code / tools / sourceHandle when re-architecting.
       const nodeToArchPayload = (n: any) => {
         const isCondition = n.type === "condition" || n.data.role === "condition";
-        return {
+        const isCode = n.type === "code" || n.data.role === "code";
+        const baseRole = isCondition ? "condition" : isCode ? "code" : n.data.role;
+        const base: any = {
           id: n.id,
           label: n.data.label,
-          role: isCondition ? "condition" : n.data.role,
+          role: baseRole,
           description: n.data.description || "",
           input: n.data.input || "",
           output: n.data.output || "",
-          ...(isCondition
-            ? { condition_prompt: n.data.condition_prompt || "" }
-            : { system_prompt: n.data.system_prompt || "" }),
-          tools: Array.isArray(n.data.tools) ? n.data.tools : undefined,
+          tools: Array.isArray(n.data.tools) ? n.data.tools : (isCondition || isCode ? [] : undefined),
         };
+        if (isCondition) base.condition_prompt = n.data.condition_prompt || "";
+        else if (isCode) base.code = n.data.code || "";
+        else base.system_prompt = n.data.system_prompt || "";
+        return base;
       };
       const edgeToArchPayload = (e: any) => ({
         id: e.id,
@@ -402,13 +421,20 @@ export function CanvasEditor() {
         const key = n.label.toLowerCase();
         const preservedPosition = existingPositionsMap.get(key);
         const isCondition = n.role === "condition";
+        const isCode = n.role === "code";
+        let data: any;
+        if (isCondition) {
+          data = { label: n.label, role: "condition", status: "idle", condition_prompt: n.condition_prompt || "" };
+        } else if (isCode) {
+          data = { label: n.label, role: "code", status: "idle", description: n.description, input: n.input, output: n.output, code: n.code || "" };
+        } else {
+          data = { label: n.label, role: n.role, status: "idle", description: n.description, input: n.input, output: n.output, system_prompt: n.system_prompt || "", tools: Array.isArray(n.tools) ? n.tools : undefined };
+        }
         return {
           id: n.id,
-          type: isCondition ? "condition" : "agent",
+          type: isCondition ? "condition" : isCode ? "code" : "agent",
           position: preservedPosition ?? computedPositions[n.id] ?? { x: 100, y: 100 },
-          data: isCondition
-            ? { label: n.label, role: "condition", status: "idle", condition_prompt: n.condition_prompt || "" }
-            : { label: n.label, role: n.role, status: "idle", description: n.description, input: n.input, output: n.output, system_prompt: n.system_prompt || "", tools: Array.isArray(n.tools) ? n.tools : undefined },
+          data,
         };
       });
 
@@ -451,8 +477,9 @@ export function CanvasEditor() {
       // 1. Create missing agents
       const existingLabels = new Set(globalAgents.map(a => a.label));
       for (const node of plan.nodes) {
-        // Condition nodes are pure router cells — they do not live in the Agent Library.
+        // Condition / code nodes are pure non-LLM cells — they do not live in the Agent Library.
         if (node.type === "condition" || node.data.role === "condition") continue;
+        if (node.type === "code" || node.data.role === "code") continue;
         const { label, role, description, input, output, system_prompt } = node.data;
         if (!existingLabels.has(label)) {
           const newAgent = await api.createAgent(activeWorkspaceId, {

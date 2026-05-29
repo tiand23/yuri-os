@@ -133,6 +133,10 @@ class AgentNodeSchema(BaseModel):
     # When role == "condition", the LLM uses condition_prompt instead of system_prompt
     # to decide a true/false routing. Plain agent nodes leave this as None.
     condition_prompt: Optional[str] = None
+    # When role == "code", this node is a deterministic Python sandbox — `code` holds the
+    # script. Upstream payload comes in via stdin; whatever the script prints to stdout
+    # becomes this node's output. NO LLM call.
+    code: Optional[str] = None
     # Subset of tool names from /api/tools the agent is allowed to call.
     # None = all tools (legacy). Empty list = no tools (pure LLM).
     tools: Optional[List[str]] = None

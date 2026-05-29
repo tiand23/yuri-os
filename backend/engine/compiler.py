@@ -1,7 +1,7 @@
 from typing import Dict, Any, List, Optional
 from langgraph.graph import StateGraph, START, END
 from engine.state import GraphState
-from engine.nodes import create_facility_node, create_condition_node
+from engine.nodes import create_facility_node, create_condition_node, create_code_node
 
 
 class CycleDetectedError(ValueError):
@@ -101,6 +101,12 @@ def compile_workflow(canvas_data: Dict[str, Any], progress_callback=None, llm_co
             condition_func, _ = create_condition_node(nid, label, condition_prompt, upstream_ids=upstream_ids, progress_callback=progress_callback, llm_config=llm_config)
             builder.add_node(nid, condition_func)
             condition_node_ids.add(nid)
+        elif node_type == "code":
+            # Deterministic Python-only node — no LLM. Receives upstream payload via stdin,
+            # emits stdout as this node's output.
+            label = data.get("label", f"Code_{nid}")
+            code = data.get("code", "")
+            builder.add_node(nid, create_code_node(nid, label, code, upstream_ids=upstream_ids, progress_callback=progress_callback))
         else:
             label = data.get("label", f"Node_{nid}")
             description = data.get("description", "")

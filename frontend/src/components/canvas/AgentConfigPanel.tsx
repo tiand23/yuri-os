@@ -1,6 +1,6 @@
 "use client";
 
-import { X, Trash2, Terminal, GitBranch, Cpu, Save, Wrench } from "lucide-react";
+import { X, Trash2, Terminal, GitBranch, Cpu, Save, Wrench, Code2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/useT";
 import { api, ToolMetadata } from "@/lib/api";
@@ -54,6 +54,7 @@ export function AgentConfigPanel({ nodeId, nodeData, onClose, onUpdate, onDelete
   if (!nodeId || !nodeData) return null;
 
   const isCondition = nodeData.condition_prompt !== undefined || nodeData.role === "condition";
+  const isCode = nodeData.role === "code" || nodeData.code !== undefined;
 
   const handleChange = (field: string, value: string) => {
     const newData = { ...formData, [field]: value };
@@ -73,7 +74,9 @@ export function AgentConfigPanel({ nodeId, nodeData, onClose, onUpdate, onDelete
         <h3 className="font-mono text-sm font-bold text-primary tracking-widest flex items-center gap-2">
           {isCondition
             ? <><GitBranch className="h-4 w-4 text-yellow-400" /><span className="text-yellow-400">{t('panel_title_condition')}</span></>
-            : <><Cpu className="h-4 w-4" />{t('panel_title_agent')}</>
+            : isCode
+              ? <><Code2 className="h-4 w-4 text-emerald-400" /><span className="text-emerald-400">{t('panel_title_code')}</span></>
+              : <><Cpu className="h-4 w-4" />{t('panel_title_agent')}</>
           }
         </h3>
         <div className="flex items-center gap-2">
@@ -110,6 +113,41 @@ export function AgentConfigPanel({ nodeId, nodeData, onClose, onUpdate, onDelete
                 rows={6}
                 placeholder={t('condition_prompt_placeholder')}
                 className="w-full rounded border border-yellow-500/30 bg-background/95 p-2.5 font-mono text-xs text-yellow-200/80 placeholder:text-white/30 focus:border-yellow-400 focus:outline-none resize-none leading-relaxed"
+              />
+            </div>
+          </>
+        ) : isCode ? (
+          /* Code 节点字段 — 沙箱 Python，stdin 拿 payload，stdout 是输出 */
+          <>
+            <div className="space-y-1.5">
+              <label className="font-mono text-xs font-bold tracking-wider text-emerald-400/80 uppercase">{t('field_node_name')}</label>
+              <input
+                value={formData.label || ""}
+                onChange={e => handleChange("label", e.target.value)}
+                className="w-full rounded border border-emerald-500/30 bg-background p-2.5 font-mono text-sm text-white focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400/30"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="font-mono text-xs font-bold tracking-wider text-emerald-400/80 uppercase">{t('field_core_directive')}</label>
+              <textarea
+                value={formData.description || ""}
+                onChange={e => handleChange("description", e.target.value)}
+                rows={2}
+                className="w-full rounded border border-emerald-500/30 bg-background p-2.5 font-mono text-sm text-white focus:border-emerald-400 focus:outline-none resize-none"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="font-mono text-xs font-bold tracking-wider text-emerald-400/80 uppercase flex items-center gap-1">
+                <Code2 className="h-3 w-3" /> {t('field_code_label')}
+              </label>
+              <p className="text-[10px] font-mono text-slate-500 leading-relaxed">{t('code_hint')}</p>
+              <textarea
+                value={formData.code || ""}
+                onChange={e => handleChange("code", e.target.value)}
+                rows={14}
+                spellCheck={false}
+                placeholder={"import sys\npayload = sys.stdin.read()\n# transform payload here\nprint(payload)"}
+                className="w-full rounded border border-emerald-500/30 bg-black/60 p-2.5 font-mono text-xs text-emerald-200/90 placeholder:text-white/30 focus:border-emerald-400 focus:outline-none resize-y leading-relaxed"
               />
             </div>
           </>

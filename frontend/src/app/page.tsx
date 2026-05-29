@@ -142,22 +142,25 @@ export default function CommanderTerminal() {
       let currentArch: { nodes: any[]; edges: any[] } | undefined = undefined;
 
       // When forwarding the current canvas back to the architect for a modify-request,
-      // we MUST preserve condition_prompt / tools / sourceHandle — otherwise the LLM
-      // sees a flattened DAG with no branching info and "unbranches" the graph.
+      // we MUST preserve condition_prompt / code / tools / sourceHandle — otherwise the LLM
+      // sees a flattened DAG with no branching info and "unbranches" or "un-codes" the graph.
       const nodeToArchPayload = (n: any) => {
         const isCondition = n.type === "condition" || n.data.role === "condition";
-        return {
+        const isCode = n.type === "code" || n.data.role === "code";
+        const baseRole = isCondition ? "condition" : isCode ? "code" : n.data.role;
+        const base = {
           id: n.id,
           label: n.data.label,
-          role: isCondition ? "condition" : n.data.role,
+          role: baseRole,
           description: n.data.description || "",
           input: n.data.input || "",
           output: n.data.output || "",
-          ...(isCondition
-            ? { condition_prompt: n.data.condition_prompt || "" }
-            : { system_prompt: n.data.system_prompt || "" }),
-          tools: Array.isArray(n.data.tools) ? n.data.tools : undefined,
-        };
+          tools: Array.isArray(n.data.tools) ? n.data.tools : (isCondition || isCode ? [] : undefined),
+        } as any;
+        if (isCondition) base.condition_prompt = n.data.condition_prompt || "";
+        else if (isCode) base.code = n.data.code || "";
+        else base.system_prompt = n.data.system_prompt || "";
+        return base;
       };
       const edgeToArchPayload = (e: any) => ({
         id: e.id,
@@ -190,13 +193,20 @@ export default function CommanderTerminal() {
         const key = n.label.toLowerCase();
         const preservedPosition = existingPositionsMap.get(key);
         const isCondition = n.role === "condition";
+        const isCode = n.role === "code";
+        let data: any;
+        if (isCondition) {
+          data = { label: n.label, role: "condition", status: "idle", condition_prompt: n.condition_prompt || "" };
+        } else if (isCode) {
+          data = { label: n.label, role: "code", status: "idle", description: n.description, input: n.input, output: n.output, code: n.code || "" };
+        } else {
+          data = { label: n.label, role: n.role, status: "idle", description: n.description, input: n.input, output: n.output, system_prompt: n.system_prompt || "", tools: Array.isArray(n.tools) ? n.tools : undefined };
+        }
         return {
           id: n.id,
-          type: isCondition ? "condition" : "agent",
+          type: isCondition ? "condition" : isCode ? "code" : "agent",
           position: preservedPosition ?? computedPositions[n.id] ?? { x: 100, y: 100 },
-          data: isCondition
-            ? { label: n.label, role: "condition", status: "idle", condition_prompt: n.condition_prompt || "" }
-            : { label: n.label, role: n.role, status: "idle", description: n.description, input: n.input, output: n.output, system_prompt: n.system_prompt || "", tools: Array.isArray(n.tools) ? n.tools : undefined },
+          data,
         };
       });
 
@@ -240,8 +250,9 @@ export default function CommanderTerminal() {
       if (activeWorkspaceId) {
         const existingLabels = new Set(globalAgents.map(a => a.label));
         for (const node of plan.nodes) {
-          // Condition nodes are pure router cells — they do not live in the Agent Library.
+          // Condition / code nodes are pure non-LLM cells — they do not live in the Agent Library.
           if (node.type === "condition" || node.data.role === "condition") continue;
+          if (node.type === "code" || node.data.role === "code") continue;
           const { label, role, description, input, output, system_prompt } = node.data;
           if (!existingLabels.has(label)) {
             const newAgent = await api.createAgent(activeWorkspaceId, {

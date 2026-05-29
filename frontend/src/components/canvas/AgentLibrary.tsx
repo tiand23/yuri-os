@@ -1,7 +1,7 @@
 "use client";
 
 import { useAppStore } from "@/lib/store";
-import { BrainCircuit, Code, Database, Search, Cpu, GitBranch, RefreshCw } from "lucide-react";
+import { BrainCircuit, Code, Code2, Database, Search, Cpu, GitBranch, RefreshCw } from "lucide-react";
 import { useT } from "@/lib/useT";
 
 const roleIcons: Record<string, any> = {
@@ -56,7 +56,7 @@ export function AgentLibrary({ onSyncAgents, isSyncing }: AgentLibraryProps) {
       <div
         draggable
         onDragStart={(e) => onDragStart(e, "condition", "condition", t('condition_node_name_default'), t('condition_node_desc_default'), "", "", "")}
-        className="group flex shrink-0 cursor-grab items-center space-x-3 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-2 mb-3 transition-all hover:bg-yellow-500/15 hover:border-yellow-500/60 hover:shadow-[0_0_15px_rgba(234,179,8,0.3)] active:cursor-grabbing"
+        className="group flex shrink-0 cursor-grab items-center space-x-3 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-2 mb-2 transition-all hover:bg-yellow-500/15 hover:border-yellow-500/60 hover:shadow-[0_0_15px_rgba(234,179,8,0.3)] active:cursor-grabbing"
       >
         <div className="flex h-8 w-8 items-center justify-center rounded bg-yellow-500/20 border border-yellow-500/40 group-hover:border-yellow-400">
           <GitBranch className="h-4 w-4 text-yellow-400" />
@@ -64,6 +64,21 @@ export function AgentLibrary({ onSyncAgents, isSyncing }: AgentLibraryProps) {
         <div className="flex flex-col">
           <span className="font-mono text-xs font-bold text-yellow-300 tracking-wider">{t('condition_node_label')}</span>
           <span className="font-mono text-[9px] text-yellow-500/60">{t('condition_node_sub')}</span>
+        </div>
+      </div>
+
+      {/* Code 节点 — 固定内置，沙箱 Python，无 LLM 调用 */}
+      <div
+        draggable
+        onDragStart={(e) => onDragStart(e, "code", "code", t('code_node_name_default'), t('code_node_desc_default'), "", "", "")}
+        className="group flex shrink-0 cursor-grab items-center space-x-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-2 mb-3 transition-all hover:bg-emerald-500/15 hover:border-emerald-500/60 hover:shadow-[0_0_15px_rgba(16,185,129,0.3)] active:cursor-grabbing"
+      >
+        <div className="flex h-8 w-8 items-center justify-center rounded bg-emerald-500/20 border border-emerald-500/40 group-hover:border-emerald-400">
+          <Code2 className="h-4 w-4 text-emerald-400" />
+        </div>
+        <div className="flex flex-col">
+          <span className="font-mono text-xs font-bold text-emerald-300 tracking-wider">{t('code_node_label')}</span>
+          <span className="font-mono text-[9px] text-emerald-500/60">{t('code_node_sub')}</span>
         </div>
       </div>
 

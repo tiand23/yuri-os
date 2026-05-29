@@ -51,33 +51,35 @@ _SANDBOX_FSIZE_BYTES = 4 * 1024 * 1024   # 4 MiB max output file
 _SANDBOX_OUTPUT_CHARS = 8000             # truncate captured stdout/stderr to this many chars
 
 
-@tool
-def execute_python_code(code: str) -> str:
-    """
-    Execute Python code in a sandboxed subprocess and return its stdout.
-    Print the results you want to see. The sandbox enforces:
-      - 8 s wallclock timeout
-      - 5 s CPU time, 256 MiB memory, 4 MiB output file (Unix)
+def run_sandboxed_python(code: str, stdin_payload: str = "") -> str:
+    """Run Python code in an isolated subprocess and return stdout (or formatted error).
+
+    Shared by both the `execute_python_code` LLM-callable tool AND the Code Node engine
+    (engine/nodes.py:create_code_node) so the security guarantees apply uniformly.
+
+    Limits enforced:
+      - 8 s wallclock timeout (subprocess.run timeout)
+      - 5 s CPU time, 256 MiB memory, 4 MiB output file (Unix setrlimit)
       - clean environment variables (cannot read OPENAI_API_KEY etc)
       - isolated temp working directory (cannot read project files via relative paths)
-    Network access is NOT blocked — agents may legitimately need to call APIs.
+
+    Network access is NOT blocked — Code Nodes commonly need to call HTTP APIs or DBs.
+
+    `stdin_payload` is fed to the subprocess's stdin. Code Node templates rely on this:
+    user code reads `payload = sys.stdin.read()` to receive the upstream agent's output.
+    For the LLM tool case (no upstream), it defaults to empty.
     """
     import subprocess
     import sys
     import tempfile
-    import os
     import shutil
 
-    # Build a setrlimit hook for Unix. On import failure (Windows), just skip it —
-    # the wallclock and env isolation still apply.
     preexec = None
     try:
         import resource
 
         def _apply_rlimits():
             resource.setrlimit(resource.RLIMIT_CPU, (_SANDBOX_CPU_SEC, _SANDBOX_CPU_SEC))
-            # AS = address space; not all platforms honor it on every binary, but it's
-            # the best portable cap available outside of cgroups.
             try:
                 resource.setrlimit(resource.RLIMIT_AS, (_SANDBOX_MEM_BYTES, _SANDBOX_MEM_BYTES))
             except (ValueError, OSError):
@@ -86,7 +88,6 @@ def execute_python_code(code: str) -> str:
                 resource.setrlimit(resource.RLIMIT_FSIZE, (_SANDBOX_FSIZE_BYTES, _SANDBOX_FSIZE_BYTES))
             except (ValueError, OSError):
                 pass
-            # Forbid forking new processes / threads via RLIMIT_NPROC where supported.
             try:
                 resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
             except (ValueError, AttributeError, OSError):
@@ -98,9 +99,6 @@ def execute_python_code(code: str) -> str:
 
     workdir = tempfile.mkdtemp(prefix="yurios_sbx_")
     try:
-        # PATH is kept so /usr/bin/python3 etc. resolve, but everything else is wiped.
-        # Crucially we drop OPENAI_API_KEY, HOME, AWS_*, etc. — the child sees nothing
-        # sensitive from the parent.
         clean_env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C.UTF-8"}
 
         try:
@@ -108,6 +106,7 @@ def execute_python_code(code: str) -> str:
                 [sys.executable, "-I", "-c", code],
                 cwd=workdir,
                 env=clean_env,
+                input=stdin_payload,
                 capture_output=True,
                 text=True,
                 timeout=_SANDBOX_WALLCLOCK_SEC,
@@ -122,11 +121,21 @@ def execute_python_code(code: str) -> str:
         if result.returncode != 0:
             return f"Output:\n{out}\nError (exit {result.returncode}):\n{err}"
         if not out and err:
-            # Code emitted warnings to stderr but exited cleanly — surface them.
             return f"Output:\n(empty)\nStderr:\n{err}"
         return out if out else "Code executed successfully with no output."
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+@tool
+def execute_python_code(code: str) -> str:
+    """
+    Execute Python code in a sandboxed subprocess and return its stdout.
+    Print the results you want to see. Network access is NOT blocked — agents may
+    legitimately need to call APIs. The sandbox isolates env vars, working directory,
+    CPU time, memory, and wallclock.
+    """
+    return run_sandboxed_python(code, stdin_payload="")
 
 # Tool registry keyed by name — lets nodes opt-in to specific tools via node.data.tools.
 # Frontend reads TOOL_METADATA to render checkboxes; backend uses TOOL_REGISTRY to filter at runtime.
